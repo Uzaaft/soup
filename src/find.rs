@@ -4,83 +4,9 @@ use std::{fmt, marker::PhantomData, rc::Rc};
 use crate::pattern::Pattern;
 use crate::attribute;
 
+/// Represents the act of matching a node in the html tree
 pub trait Query {
     fn matches(&self, node: &rcdom::Node) -> bool;
-}
-
-pub struct TagQuery<P> {
-    inner: P,
-}
-
-impl<P: Pattern> TagQuery<P> {
-    fn new(inner: P) -> TagQuery<P> {
-        TagQuery {
-            inner,
-        }
-    }
-}
-
-impl<P> fmt::Debug for TagQuery<P>
-where
-    P: Pattern + fmt::Debug,
-{
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("TagQuery")
-            .field("inner", &self.inner)
-            .finish()
-    }
-}
-
-impl<P: Pattern> Query for TagQuery<P> {
-    fn matches(&self, node: &rcdom::Node) -> bool {
-        match node.data {
-            NodeData::Element {
-                ref name, ..
-            } => self.inner.matches(name.local.as_ref()),
-            _ => false,
-        }
-    }
-}
-
-pub struct AttrQuery<K, V> {
-    key: K,
-    value: V,
-}
-
-impl<K, V> AttrQuery<K, V>
-where
-    K: Pattern,
-    V: Pattern,
-{
-    fn new(key: K, value: V) -> AttrQuery<K, V> {
-        AttrQuery {
-            key,
-            value,
-        }
-    }
-}
-
-impl<K, V> fmt::Debug for AttrQuery<K, V>
-where
-    K: Pattern + fmt::Debug,
-    V: Pattern + fmt::Debug,
-{
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("AttrQuery")
-            .field("key", &self.key)
-            .field("value", &self.value)
-            .finish()
-    }
-}
-
-impl<K, V> Query for AttrQuery<K, V>
-where
-    K: Pattern,
-    V: Pattern,
-{
-    fn matches(&self, node: &rcdom::Node) -> bool {
-        attribute::list_aware_match(&node, &self.key, &self.value)
-    }
 }
 
 impl Query for () {
@@ -89,10 +15,50 @@ impl Query for () {
     }
 }
 
+/// This type implements the "compile-time onion" mechanism for building up a dynamic number
+/// of queries. It looks kinda like a linked list, but importantly, it also implements `Query`,
+/// so it can hold another QueryWrapper. When the user adds more than one query to the chain,
+/// a new QueryWrapper wraps the old one, and replaces it at the top-level.
 pub struct QueryWrapper<'a, T: Query, U: Query> {
     inner: T,
     next: Option<U>,
     _l: PhantomData<&'a ()>,
+}
+
+impl<'a, T, U> Query for QueryWrapper<'a, T, U>
+where
+    T: Query + 'a,
+    U: Query + 'a,
+{
+    /// This is where the QueryWrapper recursively "unwraps" itself
+    fn matches(&self, node: &rcdom::Node) -> bool {
+        let inner_match = self.inner.matches(node);
+        if let Some(ref next) = self.next {
+            let next_match = next.matches(node);
+            next_match && inner_match
+        } else {
+            inner_match
+        }
+    }
+}
+
+impl<'a, T, U, V> QueryWrapper<'a, T, QueryWrapper<'a, U, V>>
+where
+    T: Query + 'a,
+    U: Query + 'a,
+    V: Query + 'a,
+{
+    /// This is where the "wrapping" operation happens. ren
+    fn wrap(
+        inner: T,
+        query: QueryWrapper<'a, U, V>,
+    ) -> QueryWrapper<'a, T, QueryWrapper<'a, U, V>> {
+        QueryWrapper {
+            inner,
+            next: Some(query),
+            _l: PhantomData,
+        }
+    }
 }
 
 impl<'a, T, U> fmt::Debug for QueryWrapper<'a, T, U>
@@ -122,42 +88,6 @@ impl<'a> EmptyQueryWrapper<'a> {
     }
 }
 
-// This is a constructor, it takes an existing QueryWrapper
-// and a new Query to add to the chain, and creates a new
-// QueryWrapper out of those two pieces
-impl<'a, T, U, V> QueryWrapper<'a, T, QueryWrapper<'a, U, V>>
-where
-    T: Query + 'a,
-    U: Query + 'a,
-    V: Query + 'a,
-{
-    fn wrap(
-        inner: T,
-        query: QueryWrapper<'a, U, V>,
-    ) -> QueryWrapper<'a, T, QueryWrapper<'a, U, V>> {
-        QueryWrapper {
-            inner,
-            next: Some(query),
-            _l: PhantomData,
-        }
-    }
-}
-
-impl<'a, T, U> Query for QueryWrapper<'a, T, U>
-where
-    T: Query + 'a,
-    U: Query + 'a,
-{
-    fn matches(&self, node: &rcdom::Node) -> bool {
-        let inner_match = self.inner.matches(node);
-        if let Some(ref next) = self.next {
-            let next_match = next.matches(node);
-            next_match && inner_match
-        } else {
-            inner_match
-        }
-    }
-}
 
 /// Construct a query to apply to an HTML tree
 ///
@@ -254,6 +184,27 @@ where
     /// ```
     pub fn tag<P: Pattern>(self, tag: P) -> QueryBuilder<'a, TagQuery<P>, QueryWrapper<'a, T, U>> {
         self.push_query(TagQuery::new(tag))
+    }
+
+    /// Specifies a string to search for in a text node
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// # extern crate soup;
+    /// # extern crate regex;
+    /// # use std::error::Error;
+    /// # use regex::Regex;
+    /// # use soup::prelude::*;
+    /// # fn main() -> Result<(), Box<Error>> {
+    /// let soup = Soup::new(r#"<div>Test</div><b id="bold-tag">SOME BOLD TEXT</b></div>"#);
+    /// let result = soup.string(Regex::new(r#".*BOLD.*"#).expect("Couldn't create regex")).find().expect("Couldn't find tag with text 'BOLD'");
+    /// assert_eq!(result.get("id"), Some("bold-tag".to_string()));
+    /// #   Ok(())
+    /// # }
+    /// ```
+    pub fn string<P: Pattern>(self, string: P) -> QueryBuilder<'a, TextQuery<P>, QueryWrapper<'a, T, U>> {
+        self.push_query(TextQuery::new(string))
     }
 
     /// Searches for a tag that has an attribute with the specified name
@@ -490,3 +441,137 @@ fn build_iter<'a, T: Query + 'a, U: Query + 'a>(
         Box::new(acc.chain(child_iter))
     })
 }
+
+/*** Types of Queries ***/
+
+pub struct TextQuery<P> {
+    inner: P,
+}
+
+impl<P: Pattern> TextQuery<P> {
+    fn new(inner: P) -> TextQuery<P> {
+        TextQuery {
+            inner,
+        }
+    }
+}
+
+impl<P> fmt::Debug for TextQuery<P>
+where
+    P: Pattern + fmt::Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TextQuery")
+            .field("inner", &self.inner)
+            .finish()
+    }
+}
+
+impl<P: Pattern> Query for TextQuery<P> {
+    fn matches(&self, node: &rcdom::Node) -> bool {
+        match node.data {
+            NodeData::Element {
+                ..
+            } => {
+                // it would be easier to just have this be
+                //
+                // node.children.borrow().iter().any(|n| self.matches(n))
+                //
+                // but then this would recurse down the whole tree
+                for n in node.children.borrow().iter() {
+                    let data = &n.data;
+                    if let NodeData::Text { ref contents, .. } = data {
+                        let c = contents.borrow().to_string();
+                        if self.inner.matches(&c) {
+                            return true;
+                        }
+                    }
+                }
+                false
+            },
+            NodeData::Text {
+                ref contents, ..
+            } => {
+                let c = contents.borrow().to_string();
+                self.inner.matches(&c)
+            },
+            _ => false,
+        }
+    }
+}
+
+pub struct TagQuery<P> {
+    inner: P,
+}
+
+impl<P: Pattern> TagQuery<P> {
+    fn new(inner: P) -> TagQuery<P> {
+        TagQuery {
+            inner,
+        }
+    }
+}
+
+impl<P> fmt::Debug for TagQuery<P>
+where
+    P: Pattern + fmt::Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TagQuery")
+            .field("inner", &self.inner)
+            .finish()
+    }
+}
+
+impl<P: Pattern> Query for TagQuery<P> {
+    fn matches(&self, node: &rcdom::Node) -> bool {
+        match node.data {
+            NodeData::Element {
+                ref name, ..
+            } => self.inner.matches(name.local.as_ref()),
+            _ => false,
+        }
+    }
+}
+
+pub struct AttrQuery<K, V> {
+    key: K,
+    value: V,
+}
+
+impl<K, V> AttrQuery<K, V>
+where
+    K: Pattern,
+    V: Pattern,
+{
+    fn new(key: K, value: V) -> AttrQuery<K, V> {
+        AttrQuery {
+            key,
+            value,
+        }
+    }
+}
+
+impl<K, V> fmt::Debug for AttrQuery<K, V>
+where
+    K: Pattern + fmt::Debug,
+    V: Pattern + fmt::Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AttrQuery")
+            .field("key", &self.key)
+            .field("value", &self.value)
+            .finish()
+    }
+}
+
+impl<K, V> Query for AttrQuery<K, V>
+where
+    K: Pattern,
+    V: Pattern,
+{
+    fn matches(&self, node: &rcdom::Node) -> bool {
+        attribute::list_aware_match(&node, &self.key, &self.value)
+    }
+}
+

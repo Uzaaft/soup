@@ -185,3 +185,12 @@ fn parent_iterator() {
                              "div".to_string(), "body".to_string(), "html".to_string(),
                              "[document]".to_string()]);
 }
+
+#[test]
+fn string_method() {
+    let soup = soup();
+    assert_eq!(
+        soup.string(Regex::new("sisters").unwrap()).find().unwrap().text(),
+        "Once upon a time there were three little sisters; and their names were\nElsie,\nLacie and\nTillie;\nand they lived at the bottom of a well."
+    );
+}

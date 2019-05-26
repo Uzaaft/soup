@@ -3,7 +3,7 @@ use html5ever::rcdom::Handle;
 
 use crate::{
     Soup,
-    find::{AttrQuery, QueryBuilder, QueryWrapper, TagQuery},
+    find::{AttrQuery, QueryBuilder, QueryWrapper, TagQuery, TextQuery},
     pattern::Pattern,
 };
 
@@ -18,6 +18,16 @@ pub trait QueryBuilderExt {
         let handle = self.get_handle();
         let qb = QueryBuilder::new(handle);
         qb.limit(limit)
+    }
+
+    /// Starts building a Query, that matches text `text`
+    fn string<'a, P: Pattern>(
+        &self,
+        patt: P,
+    ) -> QueryBuilder<'a, TextQuery<P>, QueryWrapper<'a, (), ()>> {
+        let handle = self.get_handle();
+        let qb = QueryBuilder::new(handle);
+        qb.string(patt)
     }
 
     /// Starts building a Query, with tag `tag`
