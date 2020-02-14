@@ -127,9 +127,9 @@
 //!     "http://example.com/tillie",
 //! ];
 //!
-//! for (i, link) in soup.tag("a").find_all().enumerate() {
+//! for (link, expected) in soup.tag("a").find_all().zip(expected.into_iter()) {
 //!     let href = link.get("href").expect("Couldn't find link with 'href' attribute");
-//!     assert_eq!(href, expected[i].to_string());
+//!     assert_eq!(&href, expected);
 //! }
 //! # }
 //! ```
